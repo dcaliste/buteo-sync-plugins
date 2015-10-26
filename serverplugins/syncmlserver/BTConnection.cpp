@@ -592,7 +592,7 @@ BTConnection::serverServiceRecordDef () const
     return
 "<?xml version=\"1.0\" encoding=\"UTF-8\" ?>                        \
 <!-- As per the SyncML OBEX Binding for BT specification at         \
-     http://technical.openmobilealliance.org/Technical/release_prog	ram/docs/Common/V1_2_1-20070813-A/OMA-TS-SyncML_OBEXBinding-V1_2-20070221-A.pdf	\
+     http://technical.openmobilealliance.org/Technical/release_program/docs/Common/V1_2_1-20070813-A/OMA-TS-SyncML_OBEXBinding-V1_2-20070221-A.pdf	\
 -->                                                                 \
 <record>                                                            \
   <attribute id=\"0x0001\">                                         \

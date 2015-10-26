@@ -30,100 +30,78 @@
 
 CalendarBackend::CalendarBackend() : iCalendar( 0 ), iStorage( 0 )
 {
-	FUNCTION_CALL_TRACE(lcSyncMLPluginTrace);
+    FUNCTION_CALL_TRACE(lcSyncMLPluginTrace);
 }
 
 CalendarBackend::~CalendarBackend()
 {
-	FUNCTION_CALL_TRACE(lcSyncMLPluginTrace);
+    FUNCTION_CALL_TRACE(lcSyncMLPluginTrace);
 }
 
-bool CalendarBackend::init(const QString &aNotebookName, const QString& aUid)
-{
-	FUNCTION_CALL_TRACE(lcSyncMLPluginTrace);
-
-    if( aNotebookName.isEmpty() )
+namespace {
+    mKCal::Notebook::Ptr defaultLocalCalendarNotebook(mKCal::ExtendedStorage::Ptr storage)
     {
-    	qCDebug(lcSyncMLPlugin) << "NoteBook Name to Sync is expected. It Cannot be Empty";
-        return false;
+        mKCal::Notebook::List notebooks = storage->notebooks();
+        Q_FOREACH (const mKCal::Notebook::Ptr nb, notebooks) {
+            if (nb->isMaster() && !nb->isShared() && nb->pluginName().isEmpty()) {
+                // assume that this is the default local calendar notebook.
+                return nb;
+            }
+        }
+        qCWarning(lcSyncMLPlugin) << "No default local calendar notebook found!";
+        return mKCal::Notebook::Ptr();
     }
+}
 
+bool CalendarBackend::init(const QString& aUid)
+{
+    FUNCTION_CALL_TRACE(lcSyncMLPluginTrace);
+
+    qCDebug(lcSyncMLPlugin) << "Creating Default Maemo Storage";
     iNotebookStr = aNotebookName;
 
     iCalendar = mKCal::ExtendedCalendar::Ptr( new mKCal::ExtendedCalendar( QTimeZone::systemTimeZone()) );
-
-    qCDebug(lcSyncMLPlugin) << "Creating Default Maemo Storage";
     iStorage = iCalendar->defaultStorage( iCalendar );
-
-    bool opened = iStorage->open();
-    if(!opened)
-    {
-        qCDebug(lcSyncMLPluginTrace) << "Calendar storage open failed";
-    }
-
-    mKCal::Notebook::Ptr openedNb;
-
-    // If we have an Uid, we try to get the corresponding Notebook
-    if (!aUid.isEmpty()) {
-        openedNb = iStorage->notebook(aUid);
-
-        // If we didn't get one, we create one and set its Uid
-        if (!openedNb) {
-            openedNb = mKCal::Notebook::Ptr(new mKCal::Notebook(aNotebookName,
-                                                                "Synchronization Created Notebook for " + aNotebookName));
-            if (!openedNb.isNull()) {
-                openedNb->setUid(aUid);
-                if (!iStorage->addNotebook(openedNb)) {
-                    qCWarning(lcSyncMLPlugin) << "Failed to add notebook to storage";
-                }
-            }
-        }
-    }
-
-    // If we didn't have an Uid or the creation above failed,
-    // we use the default notebook
-    if (openedNb.isNull()) {
-        openedNb = iStorage->defaultNotebook();
-        if(openedNb.isNull())
-        {
-            qCDebug(lcSyncMLPlugin) << "No default notebook exists, creating one";
-            openedNb = iStorage->createDefaultNotebook();
-        }
-    }
-
-    bool loaded = false;
-    if(opened)
-    {
-        qCDebug(lcSyncMLPlugin) << "Loading all incidences from::" << openedNb->uid();
-        loaded = iStorage->loadNotebookIncidences(openedNb->uid());
-    }
-
-    if(!loaded)
-    {
-        qCWarning(lcSyncMLPlugin) << "Failed to load calendar!";
-    }
-
-    if (opened && loaded && !openedNb.isNull())
-    {
-        iNotebookStr = openedNb->uid();
-
-        qCDebug(lcSyncMLPlugin) << "Calendar initialized";
-        return true;
-    }
-    else
-    {
-        qCWarning(lcSyncMLPlugin) << "Not able to initialize calendar";
-
+    if (!iStorage->open()) {
+        qCWarning(lcSyncMLPlugin) << "Calendar storage open failed";
         iStorage.clear();
-
-        qCDebug(lcSyncMLPluginTrace) << "Storage deleted";
-
         iCalendar.clear();
-
-        qCDebug(lcSyncMLPluginTrace) << "Calendar deleted";
-
         return false;
     }
+
+    // If we have an Uid, we try to get the corresponding Notebook
+    mKCal::Notebook::Ptr openedNb;
+    if (!aUid.isEmpty()) {
+        openedNb = iStorage->notebook(aUid);
+        if (!openedNb) {
+            qCWarning(lcSyncMLPlugin) << "Invalid notebook UID specified:" << aUid << "- aborting sync";
+            iStorage.clear();
+            iCalendar.clear();
+            return false;
+        }
+    } else {
+        // otherwise, open the default local notebook.
+        // Note: this is NOT the iStorage->defaultNotebook()
+        // TODO: find out why we don't use the defaultNotebook here!
+        openedNb = defaultLocalCalendarNotebook(iStorage);
+        if (!openedNb) {
+            qCWarning(lcSyncMLPlugin) << "Unable to open the default local notebook for sync - aborting";
+            iStorage.clear();
+            iCalendar.clear();
+            return false;
+        }
+    }
+
+    if (!iStorage->loadNotebookIncidences(openedNb->uid())) {
+        qCWarning(lcSyncMLPlugin) << "Not able to initialize calendar";
+        iStorage.clear();
+        iCalendar.clear();
+        return false;
+    }
+
+    iNotebookStr = openedNb->uid();
+    qCDebug(lcSyncMLPlugin) << "Calendar initialized, opened notebook:" << openedNb->uid() << openedNb->name();
+    return true;
 }
 
 bool CalendarBackend::uninit()

@@ -2,6 +2,7 @@
 * This file is part of buteo-sync-plugins package
 *
 * Copyright (C) 2010 Nokia Corporation. All rights reserved.
+*               2019 Updated to use bluez5 by deloptes@gmail.com
 *
 * Contact: Sateesh Kavuri <sateesh.kavuri@nokia.com>
 *
@@ -43,29 +44,59 @@
 
 #include "SyncMLPluginLogging.h"
 
-#define BLUEZ_DEST "org.bluez"
-#define BLUEZ_MANAGER_INTERFACE "org.bluez.Manager"
-#define BLUEZ_ADAPTER_INTERFACE "org.bluez.Adapter"
-#define BLUEZ_SERIAL_INTERFACE "org.bluez.Serial"
-#define REQUEST_SESSION "RequestSession"
-#define RELEASE_SESSION "ReleaseSession"
-#define GET_DEFAULT_ADAPTER "DefaultAdapter"
-#define FIND_DEVICE "FindDevice"
-#define CREATE_DEVICE "CreateDevice"
-#define CREATE_PAIRED_DEVICE "CreatePairedDevice"
-#define CONNECT "Connect"
-#define DISCONNECT "Disconnect"
+#include <adapter.h>
+#include <device.h>
+#include <initmanagerjob.h>
+#include <pendingcall.h>
 
 BTConnection::BTConnection()
  : iFd( -1 )
 {
     FUNCTION_CALL_TRACE(lcSyncMLPluginTrace);
+
+    // Initialize BluezQt
+    btManager = new BluezQt::Manager(this);
+    if (btManager != 0) {
+        BluezQt::InitManagerJob *initJob = btManager->init();
+        initJob->start();
+        QObject::connect(initJob, &BluezQt::InitManagerJob::result,
+                this, &BTConnection::initBluez5ManagerJobResult/*,
+                    Qt::QueuedConnection*/);
+        qCDebug(lcSyncMLPlugin) << "[Clnt]BTConnection manager init started";
+    }
+    else
+    {
+        qCCritical(lcSyncMLPlugin) << "[Clnt]BTConnection manager init failed";
+    }
 }
 
 BTConnection::~BTConnection()
 {
     FUNCTION_CALL_TRACE(lcSyncMLPluginTrace);
     disconnect();
+}
+
+void BTConnection::initBluez5ManagerJobResult(BluezQt::InitManagerJob* job)
+{
+    FUNCTION_CALL_TRACE(lcSyncMLPluginTrace);
+
+    if (job->error()) {
+        qCCritical(lcSyncMLPlugin) << "[Clnt]BTConnection manager init error: " << job->errorText();
+        return;
+    }
+
+    // @todo do we need this
+    Q_ASSERT(job->manager() == btManager);
+
+    if (!btManager->isBluetoothOperational()) {
+        if (btManager->isBluetoothBlocked())
+            qCWarning(lcSyncMLPlugin) << "[Clnt]BTConnection manager init failed (adapter is blocked)";
+        else
+            qCCritical(lcSyncMLPlugin) << "[Clnt]BTConnection manager init failed (not operational)";
+        return;
+    }
+
+    qCDebug(lcSyncMLPlugin) << "[Clnt]BTConnection manager init done";
 }
 
 void BTConnection::setConnectionInfo( const QString& aBTAddress,
@@ -81,14 +112,14 @@ int BTConnection::connect()
     FUNCTION_CALL_TRACE(lcSyncMLPluginTrace);
 
     if( iFd != -1 ) {
-        qCDebug(lcSyncMLPlugin) << "Using existing connection";
+        qCDebug(lcSyncMLPlugin) << "[Clnt]BTConnection: Using existing connection";
         return iFd;
     }
 
     iDevice = connectDevice( iBTAddress, iServiceUUID );
 
     if( iDevice.isEmpty() ) {
-        qCCritical(lcSyncMLPlugin) << "Could not connect to device" << iBTAddress << ", aborting";
+        qCCritical(lcSyncMLPlugin) << "[Clnt]BTConnection: Could not connect to device" << iBTAddress << ", aborting";
         return -1;
     }
 
@@ -107,7 +138,7 @@ int BTConnection::connect()
     } while ((--retryCount > 0) && (iFd == -1));
 
     if( iFd == -1 ) {
-        qCCritical(lcSyncMLPlugin) << "Could not open file descriptor of the connection, aborting";
+        qCCritical(lcSyncMLPlugin) << "[Clnt]BTConnection: Could not open file descriptor of the connection, aborting";
         disconnectDevice( iBTAddress, iDevice );
         return -1;
     }
@@ -149,160 +180,50 @@ QString BTConnection::connectDevice( const QString& aBTAddress, const QString& a
 {
     FUNCTION_CALL_TRACE(lcSyncMLPluginTrace);
 
-    QDBusInterface managerInterface( BLUEZ_DEST, "/", BLUEZ_MANAGER_INTERFACE, QDBusConnection::systemBus() );
-
-    if( !managerInterface.isValid() ) {
-        qCCritical(lcSyncMLPlugin) << "Could not find BlueZ manager interface";
-        return "";
+    BluezQt::DevicePtr dev = btManager->deviceForAddress(aBTAddress);
+    if (!dev) {
+        qCWarning(lcSyncMLPlugin) << "[Clnt]Device query failed for addr: " << aBTAddress;
     }
 
-    QDBusReply<QDBusObjectPath> pathReply = managerInterface.call( QLatin1String( GET_DEFAULT_ADAPTER ) );
-    if( !pathReply.isValid() ) {
-        qCCritical(lcSyncMLPlugin) << "Could not find default adapter path:" << pathReply.error();
-        return "";
-    }
+    BluezQt::PendingCall *call = dev->connectProfile(aServiceUUID);
+    call->waitForFinished();
 
-    QString defaultAdapterPath = pathReply.value().path();
-
-    qCDebug(lcSyncMLPlugin) << "Using adapter path: " << defaultAdapterPath;
-
-    QDBusInterface adapterInterface( BLUEZ_DEST, defaultAdapterPath, BLUEZ_ADAPTER_INTERFACE, QDBusConnection::systemBus() );
-
-    if( !adapterInterface.isValid() ) {
-        qCCritical(lcSyncMLPlugin) << "Could not find adapter interface: " << adapterInterface.lastError();
-        return "";
-    }
-
-    QDBusReply<void> voidReply = adapterInterface.call( QLatin1String( REQUEST_SESSION ) );
-
-    if( !voidReply.isValid() ) {
-        qCCritical(lcSyncMLPlugin) << "Session request failed";
-        qCCritical(lcSyncMLPlugin) << "Reason:" <<  voidReply.error();
-    }
-
-    qCDebug(lcSyncMLPlugin) << "BT session created";
-
-    pathReply = adapterInterface.call( QLatin1String( FIND_DEVICE ), aBTAddress );
-
-    if( !pathReply.isValid() ) {
-        qCWarning(lcSyncMLPlugin) << "Couldn't find device " << aBTAddress << "Reason:" <<  pathReply.error();
-        qCDebug(lcSyncMLPlugin) << "Create Device :" << aBTAddress;
-        pathReply = adapterInterface.call( QLatin1String( CREATE_DEVICE ), aBTAddress );
-            if (pathReply.isValid()){
-        qCDebug(lcSyncMLPlugin) << "Create Paired Device :" << aBTAddress << "Path :" << pathReply.value().path();
-            QDBusReply<QDBusObjectPath> reply =
-                adapterInterface.call(QLatin1String( CREATE_PAIRED_DEVICE ),
-                        aBTAddress, qVariantFromValue(pathReply.value()), QString());
-        if( !reply.isValid() ) {
-            qCCritical(lcSyncMLPlugin) << "Pairing failed Reason:" << reply.error();
-        }
-        }
-    }
-
-    if( !pathReply.isValid() ) {
-        qCCritical(lcSyncMLPlugin) << "Couldn't find device " << aBTAddress;
-        qCCritical(lcSyncMLPlugin) << "Reason:" <<  pathReply.error();
-        adapterInterface.call( QLatin1String( RELEASE_SESSION ) );
-        qCCritical(lcSyncMLPlugin) << "BT session closed";
-        return "";
-    }
-
-    QString devicePath = pathReply.value().path();
-
-    qCDebug(lcSyncMLPlugin) << "Using path" << devicePath << "for device " << aBTAddress;
-
-    QDBusInterface serialInterface( BLUEZ_DEST, devicePath, BLUEZ_SERIAL_INTERFACE, QDBusConnection::systemBus() );
-
-    if( !serialInterface.isValid() ) {
-        qCCritical(lcSyncMLPlugin) << "Could not find serial interface: " << serialInterface.lastError();
-        adapterInterface.call( QLatin1String( RELEASE_SESSION ) );
-        qCCritical(lcSyncMLPlugin) << "BT session closed";
-        return "";
-    }
-
-    QDBusReply<QString> stringReply = serialInterface.call( QLatin1String( CONNECT ), aServiceUUID );
-
-    if( !stringReply.isValid() ) {
-        qCCritical(lcSyncMLPlugin) << "Could not connect to device " << devicePath << " with service uuid " << aServiceUUID;
-        qCCritical(lcSyncMLPlugin) << "Reason:" <<  stringReply.error();
-        adapterInterface.call( QLatin1String( RELEASE_SESSION ) );
-        qCCritical(lcSyncMLPlugin) << "BT session closed";
-        return "";
+    if (call->error()) {
+        qCCritical(lcSyncMLPlugin) << "[Clnt]Could not connect to device "
+                << aBTAddress << " with service uuid " << aServiceUUID;
+        qCCritical(lcSyncMLPlugin) << "[Clnt]Reason:" <<  call->errorText();
+        return QString();
     }
 
     qCDebug(lcSyncMLPlugin) << "Device connected:" << aBTAddress;
 
-    return stringReply.value();
+    // FIXME
+    // not sure what this call was returning in BlueZ4
+    //    QDBusReply<QString> stringReply = serialInterface.call( QLatin1String( CONNECT ), aServiceUUID );
+    // I think it is nice to return the device name
+    return dev->name();
 }
 
 void BTConnection::disconnectDevice( const QString& aBTAddress, const QString& aDevice )
 {
+    Q_UNUSED(aDevice);
     FUNCTION_CALL_TRACE(lcSyncMLPluginTrace);
 
-    QDBusInterface managerInterface( BLUEZ_DEST, "/", BLUEZ_MANAGER_INTERFACE, QDBusConnection::systemBus() );
-
-    if( !managerInterface.isValid() ) {
-        qCCritical(lcSyncMLPlugin) << "Could not find BlueZ manager interface";
+    BluezQt::DevicePtr dev = btManager->deviceForAddress(aBTAddress);
+    if (!dev) {
+        qCWarning(lcSyncMLPlugin) << "[Clnt]Device query failed for addr: " << aBTAddress;
         return;
     }
 
-    QDBusReply<QDBusObjectPath> pathReply = managerInterface.call( QLatin1String( GET_DEFAULT_ADAPTER ) );
-
-    if( !pathReply.isValid() ) {
-        qCCritical(lcSyncMLPlugin) << "Could not find default adapter path";
-        qCCritical(lcSyncMLPlugin) << "Reason:" <<  pathReply.error();
-        return;
-    }
-
-    QString defaultAdapterPath = pathReply.value().path();
-
-    qCDebug(lcSyncMLPlugin) << "Using adapter path: " << defaultAdapterPath;
-
-    QDBusInterface adapterInterface( BLUEZ_DEST, defaultAdapterPath, BLUEZ_ADAPTER_INTERFACE, QDBusConnection::systemBus() );
-
-    if( !adapterInterface.isValid() ) {
-        qCCritical(lcSyncMLPlugin) << "Could not find adapter interface: " << adapterInterface.lastError();
-        return;
-    }
-
-    pathReply = adapterInterface.call( QLatin1String( FIND_DEVICE ), aBTAddress );
-
-    if( !pathReply.isValid() ) {
-        qCCritical(lcSyncMLPlugin) << "Couldn't find device " << aBTAddress;
-        qCCritical(lcSyncMLPlugin) << "Reason:" <<  pathReply.error();
-        return;
-    }
-
-    QString devicePath = pathReply.value().path();
-
-    qCDebug(lcSyncMLPlugin) << "Using path" << devicePath << "for device " << aBTAddress;
-
-    QDBusInterface serialInterface( BLUEZ_DEST, devicePath, BLUEZ_SERIAL_INTERFACE, QDBusConnection::systemBus() );
-
-    if( !serialInterface.isValid() ) {
-        qCCritical(lcSyncMLPlugin) << "Could not find serial interface: " << serialInterface.lastError();
-        return;
-    }
-
-    QDBusReply<void> voidReply = serialInterface.call( QLatin1String( DISCONNECT ), aDevice );
-
-    if( !voidReply.isValid() ) {
-        qCCritical(lcSyncMLPlugin) << "Device disconnection failed";
-        qCCritical(lcSyncMLPlugin) << "Reason:" <<  voidReply.error();
-        return;
+    BluezQt::PendingCall *call = dev->disconnectFromDevice();
+    call->waitForFinished();
+    int err = call->error() ;
+    if ( err && err != BluezQt::PendingCall::NotConnected ) {
+        qCCritical(lcSyncMLPlugin) << "[Clnt]Could not diconnect from device " << aBTAddress;
+        qCCritical(lcSyncMLPlugin) << "[Clnt]Reason:" <<  call->errorText();
     }
 
     qCDebug(lcSyncMLPlugin) << "Device disconnected:" << aBTAddress;
-
-    voidReply = adapterInterface.call( RELEASE_SESSION );
-
-    if( !voidReply.isValid() ) {
-        qCCritical(lcSyncMLPlugin) << "Session release failed";
-        qCCritical(lcSyncMLPlugin) << "Reason:" <<  voidReply.error();
-        return;
-    }
-
-    qCDebug(lcSyncMLPlugin) << "BT session closed";
 
     iDevice.clear();
 }

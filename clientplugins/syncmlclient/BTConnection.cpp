@@ -63,6 +63,10 @@ BTConnection::BTConnection()
                 this, &BTConnection::initBluez5ManagerJobResult/*,
                     Qt::QueuedConnection*/);
         qCDebug(lcSyncMLPlugin) << "[Clnt]BTConnection manager init started";
+
+        QTime dieTime= QTime::currentTime().addSecs(2);
+        while (!btManager->isOperational() && (QTime::currentTime() < dieTime))
+            QCoreApplication::processEvents(QEventLoop::AllEvents, 100);
     }
     else
     {
@@ -183,6 +187,14 @@ QString BTConnection::connectDevice( const QString& aBTAddress, const QString& a
     BluezQt::DevicePtr dev = btManager->deviceForAddress(aBTAddress);
     if (!dev) {
         qCWarning(lcSyncMLPlugin) << "[Clnt]Device query failed for addr: " << aBTAddress;
+        return QString();
+    }
+
+    QStringList props = dev->uuids();
+    if (!props.contains(aServiceUUID), Qt::CaseInsensitive) {
+        qCWarning(lcSyncMLPlugin) << "[Clnt]Device does not provide SyncML Service: " << aServiceUUID;
+        qCWarning(lcSyncMLPlugin) << "[Clnt]Device properties: " << props.join(", ");
+        return QString();
     }
 
     BluezQt::PendingCall *call = dev->connectProfile(aServiceUUID);

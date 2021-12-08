@@ -58,7 +58,6 @@ bool CalendarBackend::init(const QString& aUid)
     FUNCTION_CALL_TRACE(lcSyncMLPluginTrace);
 
     qCDebug(lcSyncMLPlugin) << "Creating Default Maemo Storage";
-    iNotebookStr = aNotebookName;
 
     iCalendar = mKCal::ExtendedCalendar::Ptr( new mKCal::ExtendedCalendar( QTimeZone::systemTimeZone()) );
     iStorage = iCalendar->defaultStorage( iCalendar );
